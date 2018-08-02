@@ -53,12 +53,43 @@ class DBWNode(object):
         self.brake_pub = rospy.Publisher('/vehicle/brake_cmd',
                                          BrakeCmd, queue_size=1)
 
-        # TODO: Create `Controller` object
-        # self.controller = Controller(<Arguments you wish to provide>)
+        self.sub_current_velocity = rospy.Subscriber("/current_velocity",
+                                                     TwistStamped, self.current_velocity_callback)
+        self.sub_twist_cmd = rospy.Subscriber("/twist_cmd",
+                                              TwistStamped, self.twist_cmd_callback)
+        self.sub_dbw_enabled = rospy.Subscriber("/vehicle/dbw_enabled",
+                                                Bool, self.dbw_enabled_callback)
 
-        # TODO: Subscribe to all the topics you need to
+        self.twist_controller = TwistController(wheel_base, steer_ratio,
+                                                max_lat_accel, max_steer_angle,
+                                                decel_limit)
+        self.dbw_enabled = False
+
+        self.current_velocity = 0
+        self.desired_angular_velocity = 0
+        self.desired_long_velocity = 0
 
         self.loop()
+
+    def deceleration_to_Nm(self, desired_deceleration):
+        brake_torque = self.vehicle_mass*self.wheel_radius*desired_deceleration
+        return brake_torque
+
+    def current_velocity_callback(self, twist_msg):
+        # current longitudinal velocity
+        self.current_velocity = twist_msg.twist.linear.x
+
+    def twist_cmd_callback(self, twist_msg):
+        # desired angular_velocity
+        self.desired_angular_velocity = twist_msg.twist.angular.z
+
+        # desired longitudinal velocity
+        self.desired_long_velocity = twist_msg.twist.linear.x
+
+    def dbw_enabled_callback(self, bool_msg):
+        self.dbw_enabled = bool_msg.data
+        rospy.logwarn('self.dbw_enabled = %d', self.dbw_enabled)
+        return
 
     def loop(self):
         rate = rospy.Rate(50) # 50Hz
@@ -66,12 +97,37 @@ class DBWNode(object):
             # TODO: Get predicted throttle, brake, and steering using `twist_controller`
             # You should only publish the control commands if dbw is enabled
             # throttle, brake, steering = self.controller.control(<proposed linear velocity>,
-            #                                                     <proposed angular velocity>,
-            #                                                     <current linear velocity>,
-            #                                                     <dbw status>,
-            #                                                     <any other argument you need>)
-            # if <dbw is enabled>:
-            #   self.publish(throttle, brake, steer)
+            if self.dbw_enabled:
+                throttle, deceleration, steering = self.twist_controller.control(self.current_velocity,
+                                                                          self.desired_long_velocity,
+                                                                          self.desired_angular_velocity)
+                # throttle message
+                throttle_msg = ThrottleCmd()
+                throttle_msg.enable = True
+                throttle_msg.pedal_cmd_type = ThrottleCmd.CMD_PERCENT
+                throttle_msg.pedal_cmd = throttle  # 0 ... 1
+                self.throttle_pub.publish(throttle_msg)
+
+                # brake message
+                brake_msg = BrakeCmd()
+                brake_msg.enable = True
+                brake_msg.pedal_cmd_type = BrakeCmd.CMD_TORQUE  # Nm, range 0 to 3250
+
+                if deceleration > 0:
+                    brake_msg.boo_cmd = True
+                    brake_msg.pedal_cmd = self.deceleration_to_Nm(deceleration)
+                else:
+                    brake_msg.boo_cmd = False
+                    brake_msg.pedal_cmd = 0
+
+                self.brake_pub.publish(brake_msg)
+
+                # steering message
+                steering_msg = SteeringCmd()
+                steering_msg.enable = True
+                steering_msg.steering_wheel_angle_cmd = steering  # in rad, range -8.2 to 8.2
+                self.steer_pub.publish(steering_msg)
+
             rate.sleep()
 
     def publish(self, throttle, brake, steer):
